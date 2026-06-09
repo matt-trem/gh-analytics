@@ -166,15 +166,21 @@ function printMonthly(counts: Map<string, number>, months = 12): void {
 }
 
 function printYearly(counts: Map<string, number>): void {
-  console.log(`\n${"YEAR".padEnd(6)} ${"COUNT".padStart(5)}`);
-  console.log("-".repeat(12));
+  console.log(`\n${"YEAR".padEnd(6)} ${"TOTAL".padStart(6)}  ${"AVG/MONTH".padStart(9)}`);
+  console.log("-".repeat(26));
+  const today = new Date();
   const byYear = new Map<number, number>();
   for (const [date, count] of counts) {
     const y = parseInt(date.slice(0, 4));
     byYear.set(y, (byYear.get(y) ?? 0) + count);
   }
   for (const year of [...byYear.keys()].sort()) {
-    console.log(`${String(year).padEnd(6)} ${String(byYear.get(year)).padStart(5)}`);
+    const total = byYear.get(year)!;
+    const monthsElapsed = year === today.getFullYear()
+      ? today.getMonth() + 1
+      : 12;
+    const avg = (total / monthsElapsed).toFixed(1);
+    console.log(`${String(year).padEnd(6)} ${String(total).padStart(6)}  ${avg.padStart(9)}`);
   }
 }
 
