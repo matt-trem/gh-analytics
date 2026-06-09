@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GitHub contribution stats for a personal account."""
+"""GitHub contribution stats for a personal account using the GraphQL API."""
 
 import os
 import sys
@@ -7,67 +7,73 @@ from datetime import date, timedelta
 from collections import defaultdict
 import requests
 
-GITHUB_API = "https://api.github.com"
+GITHUB_GRAPHQL = "https://api.github.com/graphql"
+
+CONTRIBUTIONS_QUERY = """
+query($login: String!, $from: DateTime!, $to: DateTime!) {
+  user(login: $login) {
+    contributionsCollection(from: $from, to: $to) {
+      contributionCalendar {
+        totalContributions
+        weeks {
+          contributionDays {
+            date
+            contributionCount
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
 
 def get_headers(token: str) -> dict:
     return {
         "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
+        "Content-Type": "application/json",
     }
 
 
-def fetch_events(username: str, token: str, days: int = 365) -> list[dict]:
-    """Fetch public events for a user (up to 300, ~90 days of data via API)."""
-    headers = get_headers(token)
-    events = []
-    page = 1
-    cutoff = date.today() - timedelta(days=days)
+def fetch_year(username: str, token: str, year: int) -> dict[date, int]:
+    """Fetch contribution counts for a single calendar year."""
+    from_dt = f"{year}-01-01T00:00:00Z"
+    to_dt = f"{year}-12-31T23:59:59Z"
 
-    while True:
-        url = f"{GITHUB_API}/users/{username}/events"
-        resp = requests.get(url, headers=headers, params={"per_page": 100, "page": page})
-        resp.raise_for_status()
-        batch = resp.json()
-        if not batch:
-            break
-        for e in batch:
-            event_date = date.fromisoformat(e["created_at"][:10])
-            if event_date < cutoff:
-                return events
-            events.append(e)
-        if len(batch) < 100:
-            break
-        page += 1
-        if page > 3:  # GitHub caps at 300 events total
-            break
+    resp = requests.post(
+        GITHUB_GRAPHQL,
+        headers=get_headers(token),
+        json={"query": CONTRIBUTIONS_QUERY, "variables": {"login": username, "from": from_dt, "to": to_dt}},
+    )
+    resp.raise_for_status()
+    payload = resp.json()
 
-    return events
+    if "errors" in payload:
+        for err in payload["errors"]:
+            print(f"GraphQL error: {err['message']}", file=sys.stderr)
+        sys.exit(1)
 
-
-def count_contributions(events: list[dict]) -> dict[date, int]:
-    """Count contribution-type events per day."""
-    contribution_types = {
-        "PushEvent",
-        "PullRequestEvent",
-        "PullRequestReviewEvent",
-        "IssuesEvent",
-        "IssueCommentEvent",
-        "CreateEvent",
-        "CommitCommentEvent",
-    }
-    counts: dict[date, int] = defaultdict(int)
-    for e in events:
-        if e["type"] in contribution_types:
-            d = date.fromisoformat(e["created_at"][:10])
-            counts[d] += 1
+    weeks = payload["data"]["user"]["contributionsCollection"]["contributionCalendar"]["weeks"]
+    counts: dict[date, int] = {}
+    for week in weeks:
+        for day in week["contributionDays"]:
+            counts[date.fromisoformat(day["date"])] = day["contributionCount"]
     return counts
 
 
+def fetch_all(username: str, token: str, since_year: int) -> dict[date, int]:
+    """Fetch contributions from since_year through today."""
+    today = date.today()
+    all_counts: dict[date, int] = {}
+    for year in range(since_year, today.year + 1):
+        print(f"  Fetching {year}...")
+        all_counts.update(fetch_year(username, token, year))
+    return all_counts
+
+
 def print_daily(counts: dict[date, int], days: int = 30) -> None:
-    print(f"\n{'DATE':<12} {'CONTRIBUTIONS':>13}")
-    print("-" * 26)
+    print(f"\n{'DATE':<12} {'COUNT':>5}  CHART")
+    print("-" * 50)
     today = date.today()
     for i in range(days - 1, -1, -1):
         d = today - timedelta(days=i)
@@ -77,10 +83,9 @@ def print_daily(counts: dict[date, int], days: int = 30) -> None:
 
 
 def print_weekly(counts: dict[date, int], weeks: int = 12) -> None:
-    print(f"\n{'WEEK START':<12} {'CONTRIBUTIONS':>13}")
-    print("-" * 26)
+    print(f"\n{'WEEK START':<12} {'COUNT':>5}")
+    print("-" * 18)
     today = date.today()
-    # Start of current week (Monday)
     week_start = today - timedelta(days=today.weekday())
     for i in range(weeks - 1, -1, -1):
         ws = week_start - timedelta(weeks=i)
@@ -89,8 +94,8 @@ def print_weekly(counts: dict[date, int], weeks: int = 12) -> None:
 
 
 def print_monthly(counts: dict[date, int], months: int = 12) -> None:
-    print(f"\n{'MONTH':<10} {'CONTRIBUTIONS':>13}")
-    print("-" * 24)
+    print(f"\n{'MONTH':<10} {'COUNT':>5}")
+    print("-" * 16)
     today = date.today()
     year, month = today.year, today.month
     results = []
@@ -106,8 +111,8 @@ def print_monthly(counts: dict[date, int], months: int = 12) -> None:
 
 
 def print_yearly(counts: dict[date, int]) -> None:
-    print(f"\n{'YEAR':<6} {'CONTRIBUTIONS':>13}")
-    print("-" * 20)
+    print(f"\n{'YEAR':<6} {'COUNT':>5}")
+    print("-" * 12)
     by_year: dict[int, int] = defaultdict(int)
     for d, c in counts.items():
         by_year[d.year] += c
@@ -115,19 +120,18 @@ def print_yearly(counts: dict[date, int]) -> None:
         print(f"{year:<6} {by_year[year]:>5}")
 
 
-def main():
+def main() -> None:
     token = os.environ.get("GITHUB_TOKEN")
     if not token:
         print("Error: set GITHUB_TOKEN environment variable.", file=sys.stderr)
         sys.exit(1)
 
     username = os.environ.get("GITHUB_USER", "matt-trem")
+    since_year = int(os.environ.get("GITHUB_SINCE_YEAR", date.today().year - 2))
 
-    print(f"Fetching GitHub activity for @{username}...")
-    events = fetch_events(username, token, days=365)
-    print(f"  {len(events)} events fetched.")
-
-    counts = count_contributions(events)
+    print(f"Fetching GitHub contributions for @{username} (since {since_year})...")
+    counts = fetch_all(username, token, since_year)
+    print(f"  {sum(counts.values())} total contributions across {len(counts)} days.")
 
     print("\n=== DAILY (last 30 days) ===")
     print_daily(counts, days=30)
